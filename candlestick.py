@@ -292,7 +292,7 @@ def log_trade(action, symbol, price):
     """
     with open("trades_log.csv", "a") as file:
         # Write one CSV row: timestamp, action, symbol, price
-        file.write(f"{dt.datetime.now(pytz.timezone(timeZone))},{action},{symbol},{price}\n")
+        file.write(f"{dt.datetime.now(pytz.timezone(timeZone))},{action},'candlesticks',{symbol},{price}\n")
 
 
 # ============================================================
@@ -535,6 +535,7 @@ class Candlestick:
         self.fyers = fyers                      # REST API client for live quotes
         self.trigger = None                     # Trailing stop activation level
         self.last_evaluated_candle = None       # Guards against re-evaluating the same candle
+        self.cooldown_candles = 0               # Number of candles to skip after an exit signal
 
 
     # ============================================================
@@ -607,6 +608,7 @@ class Candlestick:
         # Print the last few rows so we can monitor the live feed in the terminal
         print(self.data.tail())
 
+        
         # ── Step 2: Identify the last CLOSED candle ────────────────────────
         # iloc[-1] = the live, still-forming candle (incomplete — never trade on this)
         # iloc[-2] = the last FULLY closed candle (safe to evaluate patterns on)
@@ -622,6 +624,12 @@ class Candlestick:
             # Mark this candle as evaluated to prevent duplicate signals
             # from the many ticks that will arrive during the same minute
             self.last_evaluated_candle = closed_candle_time
+
+            if self.cooldown_candles > 0:
+                self.cooldown_candles -= 1
+
+            if self.cooldown_candles > 0:
+                return
 
             # Run pattern detection on the last 10 candles.
             # Note: index returned here refers to positions within self.data (not the tail slice),
@@ -671,16 +679,20 @@ class Candlestick:
                 self.position = 'SHORT'
 
 
+        print(self.position, self.sl, self.tp, self.trigger)
         # ── Step 4: LONG Exit Logic ────────────────────────────────────────
         if self.position == 'LONG':
             ltp = message.get('ltp')
 
             # ── Immediate Exit: TP or SL hit on this tick ─────────────────
-            if ltp >= self.tp or ltp <= self.sl:
+            if ltp >= self.tp or ltp < self.sl:
                 print(f"\n[EXIT] LONG position exited at LTP: {ltp}. TP was {self.tp}, SL was {self.sl}.")
                 bid = self.fyers.quotes(data={"symbols": symbol})['d'][0]['v']['bid']
                 log_trade("Sell", symbol, bid)
                 self._clear_position()
+                self.cooldown_candles = 3
+
+
 
             # ── Once-per-candle: Trailing or Reversal check ────────────────
             elif closed_candle_time != self.last_evaluated_candle:
@@ -711,11 +723,12 @@ class Candlestick:
             ltp = message.get('ltp')
 
             # ── Immediate Exit: SL or TP hit on this tick ─────────────────
-            if ltp >= self.sl or ltp <= self.tp:
+            if ltp > self.sl or ltp <= self.tp:
                 print(f"\n[EXIT] SHORT position exited at LTP: {ltp}. TP was {self.tp}, SL was {self.sl}.")
                 ask = self.fyers.quotes(data={"symbols": symbol})['d'][0]['v']['ask']
                 log_trade("Buy", symbol, ask)
                 self._clear_position()
+                self.cooldown_candles = 3
 
             # ── Once-per-candle: Trailing or Reversal check ────────────────
             elif closed_candle_time != self.last_evaluated_candle:
@@ -874,3 +887,87 @@ if __name__ == "__main__":
     # until manually stopped or the market closes.
     print("Connecting to live stream...")
     fyersSocket.connect()
+
+
+# df = [
+#     2026-06-02 11:29:00.636468+05:30,Buy,NSE:RELIANCE-EQ,1306.6
+# 2026-06-02 11:30:26.480504+05:30,Sell,NSE:RELIANCE-EQ,1306.3
+# 2026-06-02 11:33:00.917119+05:30,Sell,NSE:RELIANCE-EQ,1305.5
+# 2026-06-02 11:34:35.311330+05:30,Buy,NSE:RELIANCE-EQ,1306.3
+# 2026-06-02 11:35:00.620834+05:30,Sell,NSE:RELIANCE-EQ,1305
+# 2026-06-02 11:40:19.732998+05:30,Buy,NSE:RELIANCE-EQ,1302.4
+# 2026-06-02 11:45:00.538306+05:30,Buy,NSE:RELIANCE-EQ,1302.9
+# 2026-06-02 11:45:01.088656+05:30,Sell,NSE:RELIANCE-EQ,1302.7
+# 2026-06-02 11:49:00.605096+05:30,Buy,NSE:RELIANCE-EQ,1302.1
+# 2026-06-02 11:49:05.888432+05:30,Sell,NSE:RELIANCE-EQ,1302
+# 2026-06-02 11:50:00.836403+05:30,Buy,NSE:RELIANCE-EQ,1303.3
+# 2026-06-02 11:51:57.386380+05:30,Sell,NSE:RELIANCE-EQ,1302.3
+# 2026-06-02 11:54:57.458376+05:30,Sell,NSE:RELIANCE-EQ,1301
+# 2026-06-02 11:57:00.857098+05:30,Buy,NSE:RELIANCE-EQ,1301.6
+# 2026-06-02 12:00:00.979650+05:30,Sell,NSE:RELIANCE-EQ,1300.6
+# 2026-06-02 12:00:51.525782+05:30,Buy,NSE:RELIANCE-EQ,1302.6
+# 2026-06-02 12:01:01.282015+05:30,Buy,NSE:RELIANCE-EQ,1303
+# 2026-06-02 12:04:01.256541+05:30,Sell,NSE:RELIANCE-EQ,1303.1
+# 2026-06-02 12:07:03.107551+05:30,Buy,NSE:RELIANCE-EQ,1304
+# 2026-06-02 12:09:22.461232+05:30,Sell,NSE:RELIANCE-EQ,1303.8
+# 2026-06-02 12:10:00.612134+05:30,Sell,NSE:RELIANCE-EQ,1303.9
+# 2026-06-02 12:12:52.635722+05:30,Buy,NSE:RELIANCE-EQ,1304.3
+# 2026-06-02 12:14:00.587537+05:30,Sell,NSE:RELIANCE-EQ,1303.1
+# 2026-06-02 12:15:38.779841+05:30,Buy,NSE:RELIANCE-EQ,1303.2
+# 2026-06-02 12:16:00.810767+05:30,Buy,NSE:RELIANCE-EQ,1303.4
+# 2026-06-02 12:19:09.954262+05:30,Sell,NSE:RELIANCE-EQ,1303.5
+# 2026-06-02 12:28:21.894017+05:30,Buy,NSE:RELIANCE-EQ,1303.9
+# 2026-06-02 12:28:43.544271+05:30,Sell,NSE:RELIANCE-EQ,1302.8
+# 2026-06-02 12:41:24.351349+05:30,Sell,NSE:RELIANCE-EQ,1302.7
+# 2026-06-02 12:43:07.611212+05:30,Buy,NSE:RELIANCE-EQ,1303.1
+# 2026-06-02 12:43:29.248033+05:30,Buy,NSE:RELIANCE-EQ,1303.5
+# 2026-06-02 12:53:48.436424+05:30,Sell,NSE:RELIANCE-EQ,1309.6
+# 2026-06-02 13:02:21.949401+05:30,Buy,NSE:RELIANCE-EQ,1312.3
+# 2026-06-02 13:08:19.737182+05:30,Sell,NSE:RELIANCE-EQ,1313.1
+# 2026-06-02 13:15:21.881628+05:30,Buy,NSE:RELIANCE-EQ,1320.1
+# 2026-06-02 13:24:22.224578+05:30,Sell,NSE:RELIANCE-EQ,1322
+# 2026-06-02 13:25:22.124239+05:30,Sell,NSE:RELIANCE-EQ,1322.5
+# 2026-06-02 13:27:21.711741+05:30,Buy,NSE:RELIANCE-EQ,1322
+# 2026-06-02 13:30:21.663328+05:30,Buy,NSE:RELIANCE-EQ,1323.3
+# 2026-06-02 13:31:00.683359+05:30,Sell,NSE:RELIANCE-EQ,1322.8
+# 2026-06-02 13:31:22.256366+05:30,Sell,NSE:RELIANCE-EQ,1323
+# 2026-06-02 13:31:44.364596+05:30,Buy,NSE:RELIANCE-EQ,1323.5
+# 2026-06-02 13:42:24.599958+05:30,Sell,NSE:RELIANCE-EQ,1323.3
+# 2026-06-02 13:47:23.008928+05:30,Buy,NSE:RELIANCE-EQ,1322.7
+# 2026-06-02 13:50:22.429002+05:30,Sell,NSE:RELIANCE-EQ,1322.8
+# 2026-06-02 13:52:01.140108+05:30,Buy,NSE:RELIANCE-EQ,1322.1
+# 2026-06-02 13:57:22.164678+05:30,Buy,NSE:RELIANCE-EQ,1322.1
+# 2026-06-02 13:57:46.043810+05:30,Sell,NSE:RELIANCE-EQ,1321.8
+# 2026-06-02 13:59:22.974674+05:30,Sell,NSE:RELIANCE-EQ,1321.9
+# 2026-06-02 14:00:07.604643+05:30,Buy,NSE:RELIANCE-EQ,1321.9
+# 2026-06-02 14:07:24.702526+05:30,Buy,NSE:RELIANCE-EQ,1323.4
+# 2026-06-02 14:11:51.303568+05:30,Sell,NSE:RELIANCE-EQ,1321.9
+# 2026-06-02 14:12:22.668816+05:30,Sell,NSE:RELIANCE-EQ,1322.2
+# 2026-06-02 14:12:51.374969+05:30,Buy,NSE:RELIANCE-EQ,1322.6
+# 2026-06-02 14:16:21.736675+05:30,Sell,NSE:RELIANCE-EQ,1322.3
+# 2026-06-02 14:16:43.293022+05:30,Buy,NSE:RELIANCE-EQ,1322.1
+# 2026-06-02 14:18:22.052036+05:30,Sell,NSE:RELIANCE-EQ,1322.3
+# 2026-06-02 14:19:27.447888+05:30,Buy,NSE:RELIANCE-EQ,1322.6
+# 2026-06-02 14:20:21.519824+05:30,Sell,NSE:RELIANCE-EQ,1322.1
+# 2026-06-02 14:21:04.077796+05:30,Buy,NSE:RELIANCE-EQ,1322.4
+# 2026-06-02 14:24:22.383501+05:30,Sell,NSE:RELIANCE-EQ,1320.4
+# 2026-06-02 14:26:51.336102+05:30,Buy,NSE:RELIANCE-EQ,1321.8
+# 2026-06-02 14:27:21.559235+05:30,Buy,NSE:RELIANCE-EQ,1321.8
+# 2026-06-02 14:30:21.920615+05:30,Sell,NSE:RELIANCE-EQ,1318.5
+# 2026-06-02 14:33:22.688898+05:30,Sell,NSE:RELIANCE-EQ,1319.5
+# 2026-06-02 14:34:42.956074+05:30,Buy,NSE:RELIANCE-EQ,1319.9
+# 2026-06-02 14:36:21.808481+05:30,Sell,NSE:RELIANCE-EQ,1318.5
+# 2026-06-02 14:48:12.683382+05:30,Buy,NSE:RELIANCE-EQ,1314.3
+# 2026-06-02 14:48:34.218626+05:30,Sell,NSE:RELIANCE-EQ,1313.8
+# 2026-06-02 14:48:55.726898+05:30,Buy,NSE:RELIANCE-EQ,1313.7
+# 2026-06-02 14:49:22.068358+05:30,Sell,NSE:RELIANCE-EQ,1313.8
+# 2026-06-02 14:50:49.637655+05:30,Buy,NSE:RELIANCE-EQ,1314.7
+# 2026-06-02 15:03:24.570010+05:30,Sell,NSE:RELIANCE-EQ,1314.2
+# 2026-06-02 15:03:46.093211+05:30,Buy,NSE:RELIANCE-EQ,1314.3
+# 2026-06-02 15:04:21.958245+05:30,Buy,NSE:RELIANCE-EQ,1313.9
+# 2026-06-02 15:09:11.607825+05:30,Sell,NSE:RELIANCE-EQ,1312.8
+# 2026-06-02 15:09:33.098123+05:30,Sell,NSE:RELIANCE-EQ,1314.5
+# 2026-06-02 15:09:54.673738+05:30,Buy,NSE:RELIANCE-EQ,1314.5
+# 2026-06-02 15:12:21.966313+05:30,Buy,NSE:RELIANCE-EQ,1314.1
+# 2026-06-02 15:12:43.466676+05:30,Sell,NSE:RELIANCE-EQ,1313.8
+# ]
